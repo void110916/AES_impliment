@@ -1,9 +1,10 @@
 #include "aes_encryption.h"
 #include <stdint.h>
+#include <string.h>
 
-typedef uint8_t box_t[4][4];
+typedef uint8_t stat_t[4*4];
 
-uint8_t subTable [16*16]={
+const uint8_t subTable [16*16]={
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
     0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
     0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
@@ -22,7 +23,7 @@ uint8_t subTable [16*16]={
     0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16
 };
 
-uint8_t invSubTable [16*16]={
+const uint8_t invSubTable [16*16]={
     0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb,
     0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87, 0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde, 0xe9, 0xcb,
     0x54, 0x7b, 0x94, 0x32, 0xa6, 0xc2, 0x23, 0x3d, 0xee, 0x4c, 0x95, 0x0b, 0x42, 0xfa, 0xc3, 0x4e,
@@ -41,6 +42,21 @@ uint8_t invSubTable [16*16]={
     0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d
 };
 
+const uint8_t constColTable[4*4]={
+    0x02,0x03,0x01,0x01,
+    0x01,0x02,0x03,0x01,
+    0x01,0x01,0x02,0x03,
+    0x03,0x01,0x01,0x02
+
+};
+
+const uint8_t invConstColTable[4*4]={
+    0x0e,0x0b,0x0d,0x09,
+    0x09,0x0e,0x0b,0x0d,
+    0x0d,0x09,0x0e,0x0b,
+    0x0b,0x0d,0x09,0x0e
+};
+
 static inline uint8_t xtime(x){
     return  ((x<<1)^((x>>7)*0x1b));
     // (x >> 7) => b7
@@ -52,20 +68,69 @@ static inline void multiply(uint8_t x, uint8_t y){
     ((y>>2 & 1) * xtime(xtime(x))) ^
     ((y>>3 & 1) * xtime(xtime(xtime(x)))));
 }
+/**
+ * @brief transpose block(byte array) to stat
+ * @details need to transpose block matrix(row to col,col to row)
+ * @param block 
+ * @param stat 
+ */
+void block2stat(uint8_t *block, stat_t *stat){
+    // https://stackoverflow.com/questions/16737298/what-is-the-fastest-way-to-transpose-a-matrix-in-c
+    #pragma omp parallel for
+    for(int n = 0; n<4*4; n++) {
+        int i = n/4;
+        int j = n%4;
+        (*stat)[i*4+j] = block[4*j + i];
+    }
+}
+/**
+ * @brief transpose stat to block(byte array)
+ * @details need to transpose block matrix(row to col,col to row)
+ * @param stat 
+ * @param block 
+ */
+void stat2block(stat_t *stat, uint8_t *block){
+    // https://stackoverflow.com/questions/16737298/what-is-the-fastest-way-to-transpose-a-matrix-in-c
+    #pragma omp parallel for
+    for(int n = 0; n<4*4; n++) {
+        int i = n/4;
+        int j = n%4;
+        block[4*j + i]=(*stat)[i*4+j];
+    }
+}
 
-void subBytes(box_t *box){
+void subBytes(stat_t *stat){
     for (int j = 0; j < 3; j++){
         for (int i = 0; i < 3; i++){
-           (*box)[j][i] =subTable[(*box)[j][i]];
+           (*stat)[j*4+i] =subTable[(*stat)[j*4+i]];
         }
     }
 }
-void shiftBytes(box_t* box){
+
+void shiftBytes(stat_t* stat){
     uint32_t *row;
-
-    for (uint8_t i = 0; i < 3; i++){
-        row=(*box)[i];
-        (*row)=(*row)<<8|(*row)>>24;
+    #pragma omp parallel for
+    for (int i = 0; i < 3; i++){
+        row=(*stat)+i;
+        (*row)=(*row)<<(i<<3)|(*row)>>((4-i)<<3);
     }
+}
 
+void mixColumns(stat_t* stat){
+    stat_t t={0};
+    
+    #pragma omp parallel for
+    for (int i = 0; i < 4; i++)
+    {
+        for (int j = 0; j < 4; j++)
+           t[i*4+j]+=constColTable[i*4+j]*(*stat)[j*4+i]; 
+    }
+    memcpy(*stat,t,sizeof(t));
+}
+void addRoundKey(stat_t *stat,const uint8_t* roundkey,uint8_t round){
+    #pragma omp parallel for
+    for (int i = 0; i < 4*4; i++)
+    {
+        (*stat)[i]^=roundkey[i+round*4*4];
+    }
 }
