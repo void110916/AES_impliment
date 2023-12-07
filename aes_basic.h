@@ -26,5 +26,12 @@ void addRoundKey(stat_t *stat,const uint8_t* roundkey,uint8_t round);
 void keyExpain(const uint8_t *key,uint8_t *roundKey);
 
 void xor(uint8_t *buf,uint8_t *iv);
+/**
+ * @brief use pkcs7padding
+ * 
+ * @param stat 
+ * @param padlen padding length
+ */
+static inline void padding(stat_t *stat,size_t padlen){memset((*stat)+16-padlen,padlen,padlen)}
 
 #endif  // AES_BASIC_H
